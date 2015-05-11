@@ -1,0 +1,111 @@
+package suggestions
+
+
+
+import language.postfixOps
+import scala.collection.mutable
+import scala.concurrent._
+import scala.concurrent.duration._
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.util.{Try, Success, Failure}
+import rx.lang.scala._
+import org.scalatest._
+import gui._
+
+import org.junit.runner.RunWith
+import org.scalatest.junit.JUnitRunner
+
+
+@RunWith(classOf[JUnitRunner])
+class WikipediaApiTest extends FunSuite {
+
+  object mockApi extends WikipediaApi {
+    def wikipediaSuggestion(term: String) = Future {
+      if (term.head.isLetter) {
+        for (suffix <- List(" (Computer Scientist)", " (Footballer)")) yield term + suffix
+      } else {
+        List(term)
+      }
+    }
+    def wikipediaPage(term: String) = Future {
+      "Title: " + term
+    }
+  }
+
+  import mockApi._
+
+  test("WikipediaApi should make the stream valid using sanitized") {
+    val notvalid = Observable.just("erik", "erik meijer", "martin")
+    val valid = notvalid.sanitized
+
+    var count = 0
+    var completed = false
+
+    val sub = valid.subscribe(
+      term => {
+        assert(term.forall(_ != ' '))
+        count += 1
+      },
+      t => assert(false, s"stream error $t"),
+      () => completed = true
+    )
+    assert(completed && count == 3, "completed: " + completed + ", event count: " + count)
+  }
+
+  test("concatRecovered given test case 1") {
+    val requestStream = Observable.from(1 to 5)
+    def requestMethod(num: Int) = if (num != 4) Observable.just(num) else Observable.error(new Exception)
+    val actual = requestStream.concatRecovered(requestMethod).toBlocking.toList
+    assert(actual.toString == "List(Success(1), Success(2), Success(3), Failure(java.lang.Exception), Success(5))")
+  }
+
+  test("WikipediaApi should correctly use concatRecovered") {
+    val requests = Observable.just(1, 2, 3)
+    val remoteComputation = (n: Int) => Observable.just(0 to n : _*)
+    val responses = requests concatRecovered remoteComputation
+    val sum = responses.foldLeft(0) { (acc, tn) =>
+      tn match {
+        case Success(n) => acc + n
+        case Failure(t) => throw t
+      }
+    }
+    var total = -1
+    val sub = sum.subscribe {
+      s => total = s
+    }
+    assert(total == (1 + 1 + 2 + 1 + 2 + 3), s"Sum: $total")
+  }
+
+  test("It should return a Failure on exception") {
+    val error = new Error
+    val o = Observable.just(Try(1), Try(2), Failure(error), Try(4)).recovered
+    val observed = mutable.Buffer[Try[Int]]()
+    o.subscribe { _.foreach { observed += _ } }
+    assert(observed == Seq(Success(1), Success(2), Failure(error), Success(4)))
+  }
+
+  test("Observable should complete before timeout") {
+    val start = System.currentTimeMillis
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(100 millis)).timedOut(2)
+    val contents = timedOutStream.toBlocking.toList
+    val totalTime = System.currentTimeMillis - start
+    assert(contents == List((1,0),(2,1),(3,2)))
+    assert(totalTime <= 1000)
+  }
+
+  test("Observable(1, 2, 3).zip(Observable.interval(400 millis)).timedOut(1L) should return the first two values, and complete without errors") {
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(400 millis)).timedOut(1)
+    val contents = timedOutStream.toBlocking.toList
+    assert(contents == List((1,0),(2,1)))
+  }
+
+  test("Observable(1, 2, 3).zip(Observable.interval(700 millis)).timedOut(1L) should return the first value, and complete without errors") {
+    val timedOutStream = Observable.from(1 to 3).zip(Observable.interval(700 millis)).timedOut(1)
+    val contents = timedOutStream.toBlocking.toList
+    assert(contents == List((1,0)))
+  }
+
+  test("correctly compose the streams that have errors using concatRecovered") {
+    //Set(Success("erik (Computer Scientist)"), Failure(suggestions.WikipediaApiTest$WhitespaceException)) did not equal Set(Success("erik (Computer Scientist)"), Failure(suggestions.WikipediaApiTest$WhitespaceException), Success("martin (Computer Scientist)")) Set(Success(erik (Computer Scientist)), Failure(suggestions.WikipediaApiTest$WhitespaceException)
+  }
+}
